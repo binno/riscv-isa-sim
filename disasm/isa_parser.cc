@@ -249,6 +249,12 @@ isa_parser_t::isa_parser_t(const char* str, const char *priv)
     } else if (ext_str == "zkt") {
     } else if (ext_str == "smepmp") {
       extension_table[EXT_SMEPMP] = true;
+    } else if (ext_str == "spmp") {
+      if (!extension_table[EXT_SMCSRIND] || !extension_table[EXT_SSCSRIND])
+        bad_isa_string(str, "'SPMP' extension requires 'smcsrind/sscsrind'");
+      extension_table[EXT_SPMP] = true;
+    } else if (ext_str == "sspmpsw") {
+      extension_table[EXT_SSPMPSW] = true;
     } else if (ext_str == "smstateen") {
       extension_table[EXT_SMSTATEEN] = true;
     } else if (ext_str == "smpmpmt") {
@@ -604,4 +610,7 @@ isa_parser_t::isa_parser_t(const char* str, const char *priv)
     if (extension_table[ch])
       max_isa |= 1UL << (ch - 'A');
   }
+
+  if (extension_table[EXT_SPMP] && !supervisor)
+    bad_isa_string(str, "'SPMP' extension requires S mode");
 }

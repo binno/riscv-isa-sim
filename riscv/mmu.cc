@@ -43,7 +43,7 @@ void mmu_t::flush_tlb()
   flush_icache();
 }
 
-void throw_access_exception(bool virt, reg_t addr, access_type type)
+[[noreturn]] void throw_access_exception(bool virt, reg_t addr, access_type type)
 {
   switch (type) {
     case FETCH: throw trap_instruction_access_fault(virt, addr, 0, 0);
@@ -74,6 +74,12 @@ reg_t mmu_t::translate(mem_access_info_t access_info, reg_t len)
   reg_t mode = (reg_t) access_info.effective_priv;
 
   reg_t paddr = walk(access_info) | (addr & (PGSIZE-1));
+
+  reg_t satp = proc->get_state()->satp->readvirt(virt);
+  if (proc->extension_enabled_const(EXT_SPMP)) {
+    if ((satp == SATP_MODE_OFF) && (mode < PRV_M) && !spmp_ok(paddr, len, type, mode))
+      throw_page_fault_exception(virt, addr, type);
+  }
   if (!pmp_ok(paddr, len, access_info.flags.ss_access ? STORE : type, mode, access_info.flags.hlvx))
     throw_access_exception(virt, addr, access_info.flags.ss_access ? STORE : type);
   return paddr;
@@ -430,18 +436,17 @@ tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_
   return entry;
 }
 
-bool mmu_t::pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode, bool hlvx)
+bool mmu_t::pmp_search(reg_t addr, reg_t len, pmpaddr_csr_t_p* pmpaddr, size_t pmp_num, int &index)
 {
-  if (!proc || proc->n_pmp == 0)
-    return true;
+  index = NO_IDX;
 
-  for (size_t i = 0; i < proc->n_pmp; i++) {
+  for (size_t i = 0; i < pmp_num; i++) {
     // Check each 4-byte sector of the access
     bool any_match = false;
     bool all_match = true;
     for (reg_t offset = 0; offset < len; offset += 1 << PMP_SHIFT) {
       reg_t cur_addr = addr + offset;
-      bool match = proc->state.pmpaddr[i]->match4(cur_addr);
+      bool match = pmpaddr[i]->match4(cur_addr);
       any_match |= match;
       all_match &= match;
     }
@@ -451,8 +456,25 @@ bool mmu_t::pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode, bool hlv
       if (!all_match)
         return false;
 
-      return proc->state.pmpaddr[i]->access_ok(type, mode, hlvx);
+      index = i;
+      return true;
     }
+  }
+
+  return true;
+}
+
+bool mmu_t::pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode, bool hlvx)
+{
+  if (!proc || proc->n_pmp == 0)
+    return true;
+
+  int pmp_idx = NO_IDX;
+  if (pmp_search(addr, len, proc->state.mpmpaddr, proc->n_pmp, pmp_idx)) {
+    if (pmp_idx != NO_IDX)
+      return proc->state.mpmpaddr[pmp_idx]->access_ok(type, mode, hlvx);
+  } else {
+    return false;
   }
 
   // in case matching region is not found
@@ -460,6 +482,22 @@ bool mmu_t::pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode, bool hlv
   const bool mseccfg_mmwp = proc->state.mseccfg->get_mmwp();
   return ((mode == PRV_M) && !mseccfg_mmwp
           && (!mseccfg_mml || ((type == LOAD) || (type == STORE))));
+}
+
+bool mmu_t::spmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode)
+{
+  if (!proc)
+    return true;
+
+  int pmp_idx = NO_IDX;
+  if (pmp_search(addr, len, proc->state.spmpaddr, 64 - proc->n_pmp, pmp_idx)) {
+    if (pmp_idx != NO_IDX)
+      return proc->state.spmpaddr[pmp_idx]->access_ok(type, mode, false);
+  } else {
+    return false;
+  }
+
+  return true;
 }
 
 reg_t mmu_t::pmp_homogeneous(reg_t addr, reg_t len)
@@ -471,7 +509,7 @@ reg_t mmu_t::pmp_homogeneous(reg_t addr, reg_t len)
     return true;
 
   for (size_t i = 0; i < proc->n_pmp; i++)
-    if (proc->state.pmpaddr[i]->subset_match(addr, len))
+    if (proc->state.mpmpaddr[i]->subset_match(addr, len))
       return false;
 
   return true;
